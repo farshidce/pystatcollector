@@ -3,8 +3,10 @@ import uuid
 
 sys.path.append(".")
 sys.path.append("lib")
-import logger
+import logging.config
+from logging import config
 import json
+import logger
 from optparse import OptionParser
 import os
 import re
@@ -17,7 +19,7 @@ import testconstants
 import gzip
 
 
-
+logging.config.fileConfig("logging.conf.sample")
 
 # The histo dict is returned by add_timing_sample().
 # The percentiles must be sorted, ascending, like [0.90, 0.99].
@@ -77,7 +79,7 @@ class StatsCollector(object):
             diskstats_thread.start()
 
             ns_server_stats_thread = Thread(target=self.ns_server_stats,
-                                            args=([nodes[0]], bucket, 60, self._verbosity))
+                                            args=([nodes[0]], bucket, 10, self._verbosity))
             ns_server_stats_thread.start()
             rest = RestConnection(nodes[0])
             bucket_size_thead = Thread(target=self.get_bucket_size,
@@ -162,7 +164,7 @@ class StatsCollector(object):
         self._task["bucket_size"] = []
         d = []
         while not self._aborted():
-            print "Collecting bucket size stats"
+            self.log.info("collecting bucket size stats from {0}:{1}".format(rest.ip, rest.port))
             status, db_size = rest.get_database_disk_size(bucket)
             if status:
                 d.append(db_size)
@@ -171,7 +173,7 @@ class StatsCollector(object):
             time.sleep(frequency)
 
         self._task["bucket_size"] = d
-        print "finished bucket size stats"
+        self.log.info("the thread finished collecting bucket stats")
 
     def get_data_file_size(self, nodes, frequency, bucket):
         shells = []
@@ -210,7 +212,7 @@ class StatsCollector(object):
                     d["snapshots"].append(value.copy())
                 i += 1
         self._task["data_size_stats"] = d["snapshots"]
-        print " finished data_size_stats"
+        self.log.info(" finished data_size_stats")
 
     #ops stats
     #{'tot-sets': 899999, 'tot-gets': 1, 'tot-items': 899999, 'tot-creates': 899999}
@@ -258,8 +260,11 @@ class StatsCollector(object):
         self._task["buildstats"] = json_response
 
     def machine_stats(self, nodes):
-        machine_stats = StatUtil.machine_info(nodes[0])
-        self._task["machinestats"] = machine_stats
+        try:
+            machine_stats = StatUtil.machine_info(nodes[0])
+            self._task["machinestats"] = machine_stats
+        except:
+            self._aborted()
 
     def _extract_proc_info(self, shell, pid):
         o, r = shell.execute_command("cat /proc/{0}/stat".format(pid))
@@ -310,154 +315,163 @@ class StatsCollector(object):
                 d["snapshots"].append(value)
                 i += 1
         self._task["diskstats"] = d["snapshots"]
-        print " finished diskstats"
+        self.log.info(" finished diskstats")
 
     def system_stats(self, nodes, pnames, frequency, verbosity=False):
-        shells = []
-        for node in nodes:
-            try:
-                bucket = RestConnection(node).get_buckets()[0].name
-                MemcachedClientHelper.direct_client(node, bucket)
-                shells.append(RemoteMachineShellConnection(node))
-            except:
-                pass
-        d = {"snapshots": []}
-        #        "pname":"x","pid":"y","snapshots":[{"time":time,"value":value}]
+        try:
+            shells = []
+            for node in nodes:
+                try:
+                    bucket = RestConnection(node).get_buckets()[0].name
+                    MemcachedClientHelper.direct_client(node, bucket)
+                    shells.append(RemoteMachineShellConnection(node))
+                except:
+                    pass
+            d = {"snapshots": []}
+            #        "pname":"x","pid":"y","snapshots":[{"time":time,"value":value}]
 
-        start_time = str(self._task["time"])
-        while not self._aborted():
-            time.sleep(frequency)
-            current_time = time.time()
-            i = 0
-            for shell in shells:
-                node = nodes[i]
-                unique_id = node.ip + '-' + start_time
-                for pname in pnames:
-                    obj = RemoteMachineHelper(shell).is_process_running(pname)
-                    if obj and obj.pid:
-                        value = self._extract_proc_info(shell, obj.pid)
-                        value["name"] = pname
-                        value["id"] = obj.pid
-                        value["unique_id"] = unique_id
-                        value["time"] = current_time
-                        value["ip"] = node.ip
-                        d["snapshots"].append(value)
-                i += 1
-        self._task["systemstats"] = d["snapshots"]
-        print " finished system_stats"
+            start_time = str(self._task["time"])
+            while not self._aborted():
+                time.sleep(frequency)
+                current_time = time.time()
+                i = 0
+                for shell in shells:
+                    node = nodes[i]
+                    unique_id = node.ip + '-' + start_time
+                    for pname in pnames:
+                        obj = RemoteMachineHelper(shell).is_process_running(pname)
+                        if obj and obj.pid:
+                            value = self._extract_proc_info(shell, obj.pid)
+                            value["name"] = pname
+                            value["id"] = obj.pid
+                            value["unique_id"] = unique_id
+                            value["time"] = current_time
+                            value["ip"] = node.ip
+                            d["snapshots"].append(value)
+                    i += 1
+            self._task["systemstats"] = d["snapshots"]
+            self.log.info(" finished system_stats")
+        except:
+            self._aborted()
 
     def couchdb_stats(nodes):
         pass
 
     def membase_stats(self, nodes, bucket, frequency, verbose=False):
-        mcs = []
-        for node in nodes:
-            try:
-                bucket = RestConnection(node).get_buckets()[0].name
-                mcs.append(MemcachedClientHelper.direct_client(node, bucket))
-            except:
-                pass
-        self._task["membasestats"] = []
-        self._task["timings"] = []
-        self._task["dispatcher"] = []
-        self._task["tap"] = []
-        self._task["checkpoint"] = []
-        d = {}
-        #        "pname":"x","pid":"y","snapshots":[{"time":time,"value":value}]
-        for mc in mcs:
-            d[mc.host] = {"snapshots": [], "timings": [], "dispatcher": [], "tap": [], "checkpoint": []}
-
-        while not self._aborted():
-            time_left = frequency
-            # at minimum we want to check for aborted every minute
-            while not self._aborted() and time_left > 0:
-                time.sleep(min(time_left, 60))
-                if time_left >= 60:
-                    time_left -= 60
-                else:
-                    time_left = 0
+        try:
+            mcs = []
+            for node in nodes:
+                try:
+                    bucket = RestConnection(node).get_buckets()[0].name
+                    mcs.append(MemcachedClientHelper.direct_client(node, bucket))
+                except:
+                    pass
+            self._task["membasestats"] = []
+            self._task["timings"] = []
+            self._task["dispatcher"] = []
+            self._task["tap"] = []
+            self._task["checkpoint"] = []
+            d = {}
+            #        "pname":"x","pid":"y","snapshots":[{"time":time,"value":value}]
             for mc in mcs:
-                stats = mc.stats()
-                stats["time"] = time.time()
-                stats["ip"] = mc.host
-                d[mc.host]["snapshots"].append(stats)
-                timings = mc.stats('timings')
-                d[mc.host]["timings"].append(timings)
-                dispatcher = mc.stats('dispatcher')
-                d[mc.host]["dispatcher"].append(dispatcher)
-                tap = mc.stats('tap')
-                d[mc.host]["tap"].append(tap)
-                checkpoint = mc.stats('checkpoint')
-                d[mc.host]["checkpoint"].append(checkpoint)
-                print len(d[mc.host]["checkpoint"])
+                d[mc.host] = {"snapshots": [], "timings": [], "dispatcher": [], "tap": [], "checkpoint": []}
 
-        start_time = str(self._task["time"])
-        for mc in mcs:
-            ip = mc.host
-            unique_id = ip + '-' + start_time
-            current_time = time.time()
-            for snapshot in d[mc.host]["snapshots"]:
-                snapshot['unique_id'] = unique_id
-                snapshot['time'] = current_time
-                snapshot['ip'] = ip
-                self._task["membasestats"].append(snapshot)
-            for timing in d[mc.host]["timings"]:
-                timing['unique_id'] = unique_id
-                timing['time'] = current_time
-                timing['ip'] = ip
-                self._task["timings"].append(timing)
-            for dispatcher in d[mc.host]["dispatcher"]:
-                dispatcher['unique_id'] = unique_id
-                dispatcher['time'] = current_time
-                dispatcher['ip'] = ip
-                self._task["dispatcher"].append(dispatcher)
-            for tap in d[mc.host]["tap"]:
-                tap['unique_id'] = unique_id
-                tap['time'] = current_time
-                tap['ip'] = ip
-                self._task["tap"].append(tap)
-            for checkpoint in d[mc.host]["checkpoint"]:
-                checkpoint['unique_id'] = unique_id
-                checkpoint['time'] = current_time
-                checkpoint['ip'] = ip
-                self._task["checkpoint"].append(checkpoint)
-                print len(self._task["checkpoint"])
+            while not self._aborted():
+                time_left = frequency
+                # at minimum we want to check for aborted every minute
+                while not self._aborted() and time_left > 0:
+                    time.sleep(min(time_left, 60))
+                    if time_left >= 60:
+                        time_left -= 60
+                    else:
+                        time_left = 0
+                for mc in mcs:
+                    stats = mc.stats()
+                    stats["time"] = time.time()
+                    stats["ip"] = mc.host
+                    d[mc.host]["snapshots"].append(stats)
+                    timings = mc.stats('timings')
+                    d[mc.host]["timings"].append(timings)
+                    dispatcher = mc.stats('dispatcher')
+                    d[mc.host]["dispatcher"].append(dispatcher)
+                    tap = mc.stats('tap')
+                    d[mc.host]["tap"].append(tap)
+                    checkpoint = mc.stats('checkpoint')
+                    d[mc.host]["checkpoint"].append(checkpoint)
+                    print len(d[mc.host]["checkpoint"])
 
-        print " finished membase_stats"
+            start_time = str(self._task["time"])
+            for mc in mcs:
+                ip = mc.host
+                unique_id = ip + '-' + start_time
+                current_time = time.time()
+                for snapshot in d[mc.host]["snapshots"]:
+                    snapshot['unique_id'] = unique_id
+                    snapshot['time'] = current_time
+                    snapshot['ip'] = ip
+                    self._task["membasestats"].append(snapshot)
+                for timing in d[mc.host]["timings"]:
+                    timing['unique_id'] = unique_id
+                    timing['time'] = current_time
+                    timing['ip'] = ip
+                    self._task["timings"].append(timing)
+                for dispatcher in d[mc.host]["dispatcher"]:
+                    dispatcher['unique_id'] = unique_id
+                    dispatcher['time'] = current_time
+                    dispatcher['ip'] = ip
+                    self._task["dispatcher"].append(dispatcher)
+                for tap in d[mc.host]["tap"]:
+                    tap['unique_id'] = unique_id
+                    tap['time'] = current_time
+                    tap['ip'] = ip
+                    self._task["tap"].append(tap)
+                for checkpoint in d[mc.host]["checkpoint"]:
+                    checkpoint['unique_id'] = unique_id
+                    checkpoint['time'] = current_time
+                    checkpoint['ip'] = ip
+                    self._task["checkpoint"].append(checkpoint)
+
+            self.log.info(" finished membase_stats")
+        except:
+            self._aborted()
 
     def ns_server_stats(self, nodes, bucket, frequency, verbose=False):
-        self._task["ns_server_stats"] = []
-        self._task["ns_server_stats_system"] = []
-        d = {}
-        for node in nodes:
-            d[node] = {"snapshots": [], "system_snapshots": []}
-
-        while not self._aborted():
-            time.sleep(frequency)
-            print "Collecting ns_server_stats"
+        try:
+            self._task["ns_server_stats"] = []
+            self._task["ns_server_stats_system"] = []
+            d = {}
             for node in nodes:
-                os.system(
-                    "curl -X GET http://Administrator:password@{1}:8091/pools/{0}/buckets/{0}/stats?zoom=minute -o  ns_server_data".format(
-                        bucket, node.ip))
-                #f.close()
-                dict = open("./ns_server_data", "r").read()
-                data_json = json.loads(dict)
-                d[node]["snapshots"].append(data_json)
-                os.system(
-                    "curl -X GET http://Administrator:password@{1}:8091/pools/{0} -o  ns_server_data_system_stats".format(
-                        bucket, node.ip))
-                #f.close()
-                dict = open("./ns_server_data_system_stats", "r").read()
-                data_json = json.loads(dict)
-                d[node]["system_snapshots"].append(data_json)
+                d[node] = {"snapshots": [], "system_snapshots": []}
 
-        for node in nodes:
-            for snapshot in d[node]["snapshots"]:
-                self._task["ns_server_stats"].append(snapshot)
-            for snapshot in d[node]["system_snapshots"]:
-                self._task["ns_server_stats_system"].append(snapshot)
+            while not self._aborted():
+                time.sleep(frequency)
+                self.log.info("collecting ns_server_stats from all nodes in the cluster")
+                for node in nodes:
+                    self.log.info("running ")
+                    os.system(
+                        "curl -X GET http://{2}:{3}@{1}:8091/pools/{0}/buckets/{0}/stats?zoom=minute -o  ns_server_data".format(
+                            bucket, node.ip,nodes[0].rest_username,nodes[0].rest_password))
+                    #f.close()
+                    dict = open("./ns_server_data", "r").read()
+                    data_json = json.loads(dict)
+                    d[node]["snapshots"].append(data_json)
+                    os.system(
+                        "curl -X GET http://{2}:{3}@{1}:8091/pools/{0} -o  ns_server_data_system_stats".format(
+                            bucket, node.ip,nodes[0].rest_username,nodes[0].rest_password))
+                    #f.close()
+                    dict = open("./ns_server_data_system_stats", "r").read()
+                    data_json = json.loads(dict)
+                    d[node]["system_snapshots"].append(data_json)
 
-        print " finished ns_server_stats"
+            for node in nodes:
+                for snapshot in d[node]["snapshots"]:
+                    self._task["ns_server_stats"].append(snapshot)
+                for snapshot in d[node]["system_snapshots"]:
+                    self._task["ns_server_stats_system"].append(snapshot)
+
+            self.log.info(" finished ns_server_stats")
+        except:
+            self._aborted()
 
     def _aborted(self):
         return self._task["state"] == "stopped"
@@ -529,7 +543,15 @@ if __name__ == "__main__":
     try:
         time.sleep(int(options.duration))
         sc.stop()
-    finally:
-        sc.stop()
-    sc.export(options.output, input.test_params)
+    except KeyboardInterrupt:
+        print "stopping stat collectors"
+        if sc:
+            sc.stop()
+    except:
+        print "stopping stat collectors"
+        if sc:
+            sc.stop()
+    if sc:
+        print "exporting the tdata to {0}".format(options.output)
+        sc.export(options.output, input.test_params)
 

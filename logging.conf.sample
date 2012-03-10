@@ -23,11 +23,11 @@ interval=midnight
 backupCount=5
 maxBytes=20000000
 formatter=complex
-level=@@LEVEL@@
-args=('@@FILENAME@@',)
+level=INFO
+args=('stats.log',)
 
 [handler_screen]
 class=StreamHandler
 formatter=simple
-level=@@LEVEL@@
+level=INFO
 args=(sys.stdout,)
