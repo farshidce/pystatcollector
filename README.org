@@ -1,0 +1,20 @@
+Example : 
+python26 stats.py --ini=cluster.ini --frequency=10 --name=some_name --output=output_filename --duration=100
+Or ( python26 -I cluster.ini  -f 10 -n some_name -o output_filename –d 100 )
+Frequency : how often collect stats from each node , duration , how long keep the script running.
+
+Once script completes it will create a *.json.gz file that contains all the stats.
+
+1- The requirement is that they must have "yum install sysstats" on all boxes. They also should check which /dev/sd??? Their database is actually installed and change line #283.
+
+2- They need to have python 2.6 installed only on the box where they want to run this script from
+yum install git python26 python26-setuptools gcc make g++ python26-devel
+easy_install-2.6 paramiko
+git clone git://github.com/farshidce/pystatcollector.git
+cd pystatcollector
+python26 stats.py -h
+
+3- cluster.ini file describes the cluster ssh/REST information.
+Ini file example : 
+http://friendpaste.com/6hLNVrepFBiVFB8Ro5ZyVG
+
